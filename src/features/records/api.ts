@@ -1,5 +1,9 @@
 import { supabase } from "../../lib/supabase/client";
-import type { RecordItemWithFields, RecordWithValues } from "../../types/app";
+import type {
+  HistoryRecordRow,
+  RecordItemWithFields,
+  RecordWithValues,
+} from "../../types/app";
 import type { Json } from "../../types/database";
 
 export type SaveValueInput = {
@@ -47,4 +51,17 @@ export async function saveRecord(
   });
   if (error) throw error;
   return data;
+}
+
+// 記録の履歴を日付ページングで取得する。before は「その日より前」を読むカーソル (最古の recorded_on)。
+export async function fetchRecordHistory(
+  before: string | null,
+  limit = 30,
+): Promise<HistoryRecordRow[]> {
+  const { data, error } = await supabase.rpc("get_record_history", {
+    p_before: before ?? undefined,
+    p_limit: limit,
+  });
+  if (error) throw error;
+  return (data ?? []) as unknown as HistoryRecordRow[];
 }

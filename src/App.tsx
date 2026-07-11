@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { AuthProvider, useAuth } from "./features/auth/AuthProvider";
+import { HistoryPage } from "./pages/HistoryPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RecordItemsPage } from "./pages/RecordItemsPage";
 import { SignUpPage } from "./pages/SignUpPage";
@@ -22,6 +23,7 @@ export default function App() {
           <Route path="/signup" element={<SignUpPage />} />
           <Route element={<RequireAuth />}>
             <Route path="/" element={<TodayPage />} />
+            <Route path="/history" element={<HistoryPage />} />
             <Route path="/items" element={<RecordItemsPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

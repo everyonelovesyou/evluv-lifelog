@@ -17,6 +17,7 @@ export function Layout() {
           <NavLink to="/" end>
             今日の記録
           </NavLink>
+          <NavLink to="/history">記録の履歴</NavLink>
           <NavLink to="/items">項目管理</NavLink>
         </nav>
         <button type="button" className="signout" onClick={handleSignOut}>

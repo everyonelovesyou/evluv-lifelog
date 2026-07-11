@@ -15,4 +15,5 @@ supabase/.branches/
 
 # misc
 .playwright-mcp/
+.superpowers/
 *.local

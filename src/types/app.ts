@@ -17,3 +17,46 @@ export type RecordItemWithFields = RecordItem & {
 export type RecordWithValues = RecordRow & {
   record_values: RecordValue[];
 };
+
+export type HistoryAggregation = "none" | "sum";
+
+// get_record_history の fields 配列要素 (RPC 由来のため snake_case)
+export type HistoryFieldValue = {
+  field_id: string;
+  field_key: string;
+  label: string;
+  value_type: ValueType;
+  history_aggregation: HistoryAggregation;
+  unit: string | null;
+  value_bool: boolean | null;
+  value_number: number | null;
+  value_text: string | null;
+  sort_order: number;
+};
+
+// get_record_history の1行 (RPC 由来のため snake_case)。
+// has_more は全行同値のページング判定用 (buildHistoryCards は使わない)。
+export type HistoryRecordRow = {
+  record_id: string;
+  item_id: string;
+  item_key: string;
+  item_name: string;
+  frequency: Frequency;
+  recorded_on: string;
+  recorded_at: string;
+  fields: HistoryFieldValue[];
+  has_more: boolean;
+};
+
+// 表示用ビューモデル (camelCase)
+export type HistoryItemSummary = {
+  itemId: string;
+  itemName: string;
+  lines: string[];
+};
+
+export type HistoryDayCard = {
+  recordedOn: string;
+  weekday: string;
+  items: HistoryItemSummary[];
+};
