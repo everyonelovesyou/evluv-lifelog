@@ -85,7 +85,7 @@
 
 ```text
 定義層  record_items   記録項目 (名前, キー, 頻度 daily/multiple, 有効/無効, 表示順)
-      record_fields  項目が持つフィールド (値の種類, 必須, min/max, 文字数上限)
+        record_fields  項目が持つフィールド (値の種類, 必須, min/max, 文字数上限)
 記録層  records        いつ・どの項目を記録したか (記録対象日と記録日時は別)
 値層    record_values  フィールドごとの値 (value_bool / value_number / value_text)
 ```
