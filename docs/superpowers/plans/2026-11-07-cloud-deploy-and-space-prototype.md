@@ -279,6 +279,11 @@ Project ref と API URL だけを共有する (anon key はプロジェクトの
 
 `.github/workflows/supabase-deploy.yml` を次の内容で作成する。`db push` の後に型を再生成してビルド検証し、差分があればコミットして戻す。型コミットは `supabase/migrations/**` を変更しないため、このワークフローは再実行されない。
 
+運用ルール (2026-11-07 に冬月さんが定めた条件):
+- 本番適用は `concurrency` で直列化し、並行実行しない。
+- 型コミットの push は最大3回までリトライし、force push は使わない。
+- 失敗時は「DB適用」と「型同期」の結果を実行サマリーに分けて残す。通常時は自動コミットで完結させ、型同期が失敗したときだけ、artifact から回収して手動コミットする (またはワークフローを再実行する。再実行が成功すれば同期できる。自動起動はマイグレーション変更時に限るため、失敗が次回自動で直ることはない)。
+
 ```yaml
 name: Deploy migrations to Supabase
 
@@ -288,6 +293,10 @@ on:
     branches: [develop]
     paths:
       - "supabase/migrations/**"
+
+concurrency:
+  group: supabase-production-deploy
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -299,6 +308,7 @@ env:
 
 jobs:
   deploy:
+    if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -310,35 +320,75 @@ jobs:
       - name: Migrations before push
         run: supabase migration list --linked
       - name: Push migrations
+        id: dbpush
         run: supabase db push
       - name: Migrations after push
         run: supabase migration list --linked
       - name: Regenerate types
         run: supabase gen types typescript --linked > src/types/database.ts
+      - name: Upload generated types as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-types
+          path: src/types/database.ts
+          if-no-files-found: error
       - name: Verify build with regenerated types
         run: |
           npm ci
           npm run build
       - name: Commit regenerated types
+        id: types_commit
         run: |
           if git diff --quiet -- src/types/database.ts; then
             echo "types unchanged"
+            echo "result=unchanged" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/types/database.ts
           git commit -m "chore: 本番DBから型を再生成"
-          git push
+          for i in 1 2 3; do
+            if git push origin HEAD:develop; then
+              echo "result=committed" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "push rejected (attempt $i of 3), rebasing onto latest develop"
+            git fetch origin develop
+            git rebase origin/develop || git rebase --abort
+          done
+          echo "result=failed" >> "$GITHUB_OUTPUT"
+          exit 1
+      - name: Write run summary
+        if: always()
+        run: |
+          {
+            echo "## Supabase deploy result"
+            if [ "${{ steps.dbpush.outcome }}" = "success" ]; then
+              echo "- DB適用: 成功"
+            else
+              echo "- DB適用: 失敗 (Push migrations ステップのログを確認してください)"
+            fi
+            case "${{ steps.types_commit.outputs.result }}" in
+              committed) echo "- 型同期: 成功 (自動コミット済み)" ;;
+              unchanged) echo "- 型同期: 差分なし" ;;
+              failed) echo "- 型同期: 失敗 (DB適用は成功しています。artifact database-types から src/types/database.ts を回収して手動コミットするか、ワークフローを再実行してください。再実行が成功すれば同期できます)" ;;
+              *) echo "- 型同期: 未実施" ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
 ```
 
-- [ ] **Step 3: 初回実行する**
+- [ ] **Step 3: ワークフローを main にも配置する (初回のみ)**
 
-Actions タブから `Deploy migrations to Supabase` を Run workflow で実行する (2回目以降は、マイグレーションファイルのプッシュでも自動実行される)。
+`workflow_dispatch` は、ワークフローファイルがデフォルトブランチ (main) に存在しないと実行できない。初回実行の前に、develop → main の PR を作成してマージし、ワークフローファイルを main にも配置する (マージにより main は develop と一致する)。ジョブには `github.ref == 'refs/heads/develop'` の条件があるため、手動実行では必ず develop を選ぶこと (develop 以外ではジョブが実行されない)。この手順は初回のみで、以後は不要。
 
-Expected: `Migrations before push` ではローカル3本がすべて未適用、`Push migrations` がエラーなく完了し、`Migrations after push` では3本すべてに Remote のタイムスタンプが入る。あわせて Task 1 の Step 6 (型再生成) がワークフロー内で実施され、差分があれば `chore: 本番DBから型を再生成` のコミットが develop に増える。
+- [ ] **Step 4: 初回実行する**
 
-- [ ] **Step 4: 本番の外部キー設定を確認する (冬月さんの作業)**
+Actions タブから `Deploy migrations to Supabase` を、ブランチに develop を選んで Run workflow で実行する (2回目以降は、マイグレーションファイルのプッシュでも自動実行される)。
+
+Expected: `Migrations before push` ではローカル3本がすべて未適用、`Push migrations` がエラーなく完了し、`Migrations after push` では3本すべてに Remote のタイムスタンプが入る。あわせて Task 1 の Step 6 (型再生成) がワークフロー内で実施され、差分があれば `chore: 本番DBから型を再生成` のコミットが develop に増える。実行サマリーには DB適用と型同期の結果が分けて表示される。
+
+- [ ] **Step 5: 本番の外部キー設定を確認する (冬月さんの作業)**
 
 ダッシュボードの SQL エディタで Task 1 Step 2 と同じ列挙クエリを実行する。
 
