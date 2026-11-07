@@ -20,6 +20,7 @@ export async function fetchActiveItemsWithFields(): Promise<
     .from("record_items")
     .select("*, record_fields(*)")
     .eq("is_active", true)
+    .eq("record_fields.is_active", true)
     .order("sort_order")
     .order("sort_order", { referencedTable: "record_fields" });
   if (error) throw error;
