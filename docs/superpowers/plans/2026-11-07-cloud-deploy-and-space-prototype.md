@@ -8,7 +8,7 @@
 
 **Tech Stack:** Supabase Cloud / Supabase CLI 2.x / PostgreSQL / React 19 + TypeScript (既存) / Muse スペース (静的 Web アーティファクト + fetch)
 
-**Spec:** `docs/database-design-review.md` (P0/P1 の定義と優先順位)、および 2026-11-07 の冬月さんとの合意 (下記 Global Constraints に転記)
+**Spec:** `docs/reviews/database-design-review.md` (P0/P1 の定義と優先順位)、および 2026-11-07 の冬月さんとの合意 (下記 Global Constraints に転記)
 
 ## Global Constraints
 
@@ -66,7 +66,7 @@ npm run db:migration -- protect_history_from_definition_delete
 
 ```sql
 -- 定義の無効化と履歴保護: record_fields.is_active の追加、定義削除時の連鎖削除防止、recorded_at の意味明記
--- 対応: docs/database-design-review.md の P0-1 (定義削除で過去記録を失わない) と P0-3 (recorded_at の意味の確定)
+-- 対応: docs/reviews/database-design-review.md の P0-1 (定義削除で過去記録を失わない) と P0-3 (recorded_at の意味の確定)
 
 -- 1. record_fields に is_active を追加する (record_items と同じ運用に揃える)
 alter table public.record_fields
