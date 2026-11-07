@@ -279,6 +279,8 @@ Project ref と API URL だけを共有する (anon key はプロジェクトの
 
 `.github/workflows/supabase-deploy.yml` を次の内容で作成する。`db push` の後に型を再生成してビルド検証し、差分があればコミットして戻す。型コミットは `supabase/migrations/**` を変更しないため、このワークフローは再実行されない。
 
+本番適用の前に、検証ジョブ (`verify-empty-db`) が GitHub のランナー上でローカル Supabase を起動し、空の DB へ全マイグレーションを適用できることを確認する。本番適用ジョブ (`deploy`) は `needs` で検証ジョブに依存し、検証が成功したときだけ実行される。検証ジョブは本番の認証情報を使わない。
+
 運用ルール (2026-11-07 に冬月さんが定めた条件):
 - 本番適用は `concurrency` で直列化し、並行実行しない。
 - 型コミットの push は最大3回までリトライし、force push は使わない。
@@ -307,7 +309,24 @@ env:
   PROJECT_REF: qlxklpgglbalmrwrpfpq
 
 jobs:
+  verify-empty-db:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.58.5
+      - name: Start local Supabase
+        run: supabase start
+      - name: Apply all migrations to the empty local DB
+        run: supabase db reset
+      - name: Stop local Supabase
+        if: always()
+        run: supabase stop
+
   deploy:
+    needs: verify-empty-db
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     steps:
@@ -386,7 +405,7 @@ jobs:
 
 Actions タブから `Deploy migrations to Supabase` を、ブランチに develop を選んで Run workflow で実行する (2回目以降は、マイグレーションファイルのプッシュでも自動実行される)。
 
-Expected: `Migrations before push` ではローカル3本がすべて未適用、`Push migrations` がエラーなく完了し、`Migrations after push` では3本すべてに Remote のタイムスタンプが入る。あわせて Task 1 の Step 6 (型再生成) がワークフロー内で実施され、差分があれば `chore: 本番DBから型を再生成` のコミットが develop に増える。実行サマリーには DB適用と型同期の結果が分けて表示される。
+Expected: 先に検証ジョブが空のローカル DB への全マイグレーション適用を成功させ、その後に本番適用ジョブが実行される。`Migrations before push` ではローカル3本がすべて未適用、`Push migrations` がエラーなく完了し、`Migrations after push` では3本すべてに Remote のタイムスタンプが入る。あわせて Task 1 の Step 6 (型再生成) がワークフロー内で実施され、差分があれば `chore: 本番DBから型を再生成` のコミットが develop に増える。実行サマリーには DB適用と型同期の結果が分けて表示される。
 
 - [ ] **Step 5: 本番の外部キー設定を確認する (冬月さんの作業)**
 
