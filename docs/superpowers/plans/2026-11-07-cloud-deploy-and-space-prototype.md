@@ -25,7 +25,8 @@
 ## Review Focus
 
 - 定義 (項目・フィールド) を物理削除しようとした操作: 過去記録がある場合は DB が拒否し、履歴が欠けないこと (Task 1)。
-- フィールドを無効化した直後の保存: 無効化された必須フィールドが原因で `save_record` が失敗しないこと。あわせて、daily 項目の再保存で無効フィールドの過去値が消えないこと (Task 1 で RPC を変更し、Task 5 で回帰確認する)。
+- フィールドを無効化した直後の保存: 無効化された必須フィールドが原因で `save_record` が失敗しないこと。あわせて、daily 項目の再保存で無効フィールドの過去値が消えないこと、無効化前の画面から再送されても一意制約違反にならないこと (Task 1 で RPC を変更し、Task 5 で回帰確認する)。
+- スペース試作の保存: 同日に既存の外出記録がある場合も、送信していないフィールド (メモなど) の値が消えないこと (Task 6)。
 - フィールドを無効化した項目の入力画面: そのフィールドだけが入力欄から消え、他のフィールドは通常どおり入力できること (Task 1、Task 5 で目視)。
 - クラウドプロジェクト作成直後の第三者アクセス: anon key だけでは他ユーザーの行が読めないこと (Task 5 の RLS 確認で担保)。
 - スペース試作での認証情報の扱い: パスワードはスペースのフォームから Supabase へ直接送られ、エージェントやファイルに残らないこと (Task 6)。
@@ -76,10 +77,9 @@ comment on column public.record_fields.is_active is
   '入力対象かどうか。false でも過去の値は履歴に表示する';
 
 -- 2. 定義の物理削除で過去の記録・値が連鎖削除されないよう、外部キーを NO ACTION に変更する
---    RESTRICT は行ごとに即時チェックされ、auth.users からの連鎖削除 (ユーザー削除) と
---    競合し得るため使わない。NO ACTION は文の終了時にチェックされるので、1つの文で
---    連鎖が完結するユーザー削除は通り、定義の直接削除は子行が残るため文終了時点で拒否される。
 --    record_values.record_id -> records は「記録を消せば値も消える」が正しいため CASCADE のままにする
+--    定義の直接削除が拒否されることと、ユーザー削除 (auth.users からの連鎖) で
+--    関連データが残らないことは、実 DB の削除テストで確認する (計画 Task 5)
 alter table public.record_fields
   drop constraint record_fields_item_id_fkey,
   add constraint record_fields_item_id_fkey
@@ -99,12 +99,14 @@ alter table public.record_values
 comment on column public.records.recorded_at is
   'ユーザーが保存操作を行った時刻。daily 項目の再保存で更新される。出来事の発生時刻ではない';
 
--- 4. save_record を無効フィールドに対応させる (変更は次の2か所のみ)
+-- 4. save_record を無効フィールドに対応させる (変更は次の3か所のみ)
 --    init マイグレーションの save_record を全文 create or replace し、
---    下記2か所だけを変更したものにする。他は init の定義と完全に一致させる。
+--    下記3か所だけを変更したものにする。他は init の定義と完全に一致させる。
 --    (a) daily 更新時の値の全件削除で、無効フィールドの既存値を削除対象から外す
 --        (入力取得から無効フィールドが除外され再登録されないため、そのままでは過去値が消える)
---    (b) 必須フィールド検証から無効フィールドを除外する
+--    (b) 値の INSERT ループで、正当な無効フィールドの送信値を無視する (既存値を保持する)。
+--        存在しない・他ユーザー所有・別項目の field_id は、従来どおりエラーにする
+--    (c) 必須フィールド検証から無効フィールドを除外する
 ```
 
 `save_record` の再定義では、daily 更新時の値削除が次の形になること。
@@ -117,6 +119,30 @@ comment on column public.records.recorded_at is
           select 1 from public.record_fields f
           where f.id = v.field_id and f.is_active
         );
+```
+
+値の INSERT ループは、冒頭に次の判定を入れる (変数宣言に `v_field public.record_fields%rowtype` を追加する。空値スキップと insert 本体は init のまま維持する)。
+
+```sql
+  for v_value in select * from jsonb_array_elements(p_values) loop
+    select * into v_field from public.record_fields
+      where id = (v_value ->> 'field_id')::uuid;
+
+    -- 存在しない field_id は従来どおりエラー (RLS のため他ユーザーのフィールドも not found になる)
+    if not found then
+      raise exception 'record field % not found', v_value ->> 'field_id';
+    end if;
+
+    -- 別項目の field_id は従来どおりエラー
+    if v_field.item_id <> p_item_id or v_field.user_id <> auth.uid() then
+      raise exception 'field % does not belong to item %', v_field.id, p_item_id;
+    end if;
+
+    -- 正当な無効フィールドの送信値だけを無視する (既存値は (a) で保持される)
+    if not v_field.is_active then
+      continue;
+    end if;
+    -- 以降、空値スキップと insert は init のまま
 ```
 
 必須チェック部分が次の形になること。
@@ -344,6 +370,8 @@ Expected: 3本のマイグレーションがエラーなく適用される (P1-7
 4. 同じ記録対象日で、有効フィールド (外出した) を更新して保存する。
 5. 無効化したフィールドの既存値が、DB の `record_values` と履歴表示の両方に残っていることを確認する。
 6. 必須フィールドを無効化した場合は、その項目の保存が必須チェックで失敗しないこともあわせて確認する。
+7. 無効化したフィールドの値を含む `p_values` で `save_record` を直接呼んでも、一意制約違反にならず、既存値が保持されることを確認する (無効化前の画面からの再送を想定した回帰確認)。
+8. 存在しない `field_id`、別項目の `field_id` を含む `save_record` の呼び出しは、従来どおりエラーになることを確認する。
 
 - [ ] **Step 5: 定義の物理削除が拒否されることを確認する**
 
@@ -387,7 +415,19 @@ Content-Type: application/json
 {"email": "<メールアドレス>", "password": "<パスワード>"}
 ```
 
-- ログイン後、「外出を記録する」ボタンで次のリクエストを送る。`p_item_id` と `field_id` は外出項目の値 (事前に SQL で確認した値)、`p_recorded_on` は今日の日付 (YYYY-MM-DD)。
+- ログイン後、「外出を記録する」ボタンは次の順序で動作する。`save_record` は daily 項目では送信されなかった有効フィールドの値を保持しないため、既存値を先に取得して含める (メモなどの値を消さないため)。
+
+  1. 当日の外出記録とその値を、次のリクエストで取得する。`p_item_id` 相当の `<外出の item_id>` とフィールドの ID は事前に SQL で確認した値、`recorded_on` は今日の日付 (YYYY-MM-DD)。
+
+```text
+GET https://<ref>.supabase.co/rest/v1/records?select=id,record_values(field_id,value_bool,value_number,value_text)&item_id=eq.<外出の item_id>&recorded_on=eq.<今日の日付>
+
+apikey: <anon key>
+Authorization: Bearer <access_token>
+```
+
+  2. 取得した既存値を RPC の入力形式 (`{"field_id": ..., "value_bool": ...}` の配列。null の値は含めない) に変換し、done フィールドのエントリだけを `value_bool: true` に上書きする (なければ追加する)。
+  3. 次のリクエストで保存する。
 
 ```text
 POST https://<ref>.supabase.co/rest/v1/rpc/save_record
@@ -397,12 +437,14 @@ Authorization: Bearer <access_token>
 Content-Type: application/json
 
 {"p_item_id": "<外出の item_id>", "p_recorded_on": "<今日の日付>",
- "p_values": [{"field_id": "<done の field_id>", "value_bool": true}]}
+ "p_values": [<既存値の配列 (done は true に上書き済み)>]}
 ```
 
 - [ ] **Step 2: 疎通を確認する**
 
-冬月さんが試作スペースを開いてログインし、ボタンを押す。Expected: エラーなく完了し、SQL エディタで `records` に今日の外出記録が1件増えている。
+冬月さんが試作スペースを開いてログインし、ボタンを押す。Expected: エラーなく完了し、SQL エディタで次を確認できる。
+- 当日の外出記録が存在しない状態では、`records` に今日の外出記録が1件増える。
+- 当日の外出記録 (メモ付き) が既にある状態で再度押しても、同じ record が更新されるだけで行は増えず、メモの値が消えていない。
 
 - [ ] **Step 3: 結果を記録する**
 
