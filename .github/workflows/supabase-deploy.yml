@@ -1,0 +1,108 @@
+name: Deploy migrations to Supabase
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [develop]
+    paths:
+      - "supabase/migrations/**"
+
+concurrency:
+  group: supabase-production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+  SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+  PROJECT_REF: qlxklpgglbalmrwrpfpq
+
+jobs:
+  verify-empty-db:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.58.5
+      - name: Start local Supabase
+        run: supabase start
+      - name: Apply all migrations to the empty local DB
+        run: supabase db reset
+      - name: Stop local Supabase
+        if: always()
+        run: supabase stop
+
+  deploy:
+    needs: verify-empty-db
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.58.5
+      - name: Link project
+        run: supabase link --project-ref "$PROJECT_REF" -p "$SUPABASE_DB_PASSWORD"
+      - name: Migrations before push
+        run: supabase migration list --linked
+      - name: Push migrations
+        id: dbpush
+        run: supabase db push
+      - name: Migrations after push
+        run: supabase migration list --linked
+      - name: Regenerate types
+        run: supabase gen types typescript --linked > src/types/database.ts
+      - name: Upload generated types as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-types
+          path: src/types/database.ts
+          if-no-files-found: error
+      - name: Verify build with regenerated types
+        run: |
+          npm ci
+          npm run build
+      - name: Commit regenerated types
+        id: types_commit
+        run: |
+          if git diff --quiet -- src/types/database.ts; then
+            echo "types unchanged"
+            echo "result=unchanged" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/types/database.ts
+          git commit -m "chore: 本番DBから型を再生成"
+          for i in 1 2 3; do
+            if git push origin HEAD:develop; then
+              echo "result=committed" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "push rejected (attempt $i of 3), rebasing onto latest develop"
+            git fetch origin develop
+            git rebase origin/develop || git rebase --abort
+          done
+          echo "result=failed" >> "$GITHUB_OUTPUT"
+          exit 1
+      - name: Write run summary
+        if: always()
+        run: |
+          {
+            echo "## Supabase deploy result"
+            if [ "${{ steps.dbpush.outcome }}" = "success" ]; then
+              echo "- DB適用: 成功"
+            else
+              echo "- DB適用: 失敗 (Push migrations ステップのログを確認してください)"
+            fi
+            case "${{ steps.types_commit.outputs.result }}" in
+              committed) echo "- 型同期: 成功 (自動コミット済み)" ;;
+              unchanged) echo "- 型同期: 差分なし" ;;
+              failed) echo "- 型同期: 失敗 (DB適用は成功しています。artifact database-types から src/types/database.ts を回収して手動コミットするか、ワークフローを再実行してください。再実行が成功すれば同期できます)" ;;
+              *) echo "- 型同期: 未実施" ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
