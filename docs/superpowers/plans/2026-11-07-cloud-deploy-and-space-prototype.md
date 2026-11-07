@@ -4,7 +4,7 @@
 
 **Goal:** evluv-lifelog を Supabase Cloud にデプロイして日常利用を開始し、Muse のスペースから同じプロジェクトへ記録を入力できることを疎通確認する。
 
-**Architecture:** 本番DBは Supabase Cloud (PostgreSQL / Auth / RLS) とし、マイグレーションは Supabase CLI の `link` + `db push` で適用する。デプロイ前に、DB設計レビューの P0 から「定義削除で過去記録を失わない」「`recorded_at` の意味の確定」の2点だけを先行マイグレーションで固める。React アプリのホスティングデプロイは今回行わない (手元の学習・遊び用として残す)。入力経路の追加として、Muse スペース (Web アーティファクト) から Supabase REST API を直接呼ぶ試作を作り、ログインと `save_record` RPC の保存が通ることを確認する。本組みのスペースは別計画とする。
+**Architecture:** 本番DBは Supabase Cloud (PostgreSQL / Auth / RLS) とし、マイグレーションは GitHub Actions のワークフローが Supabase CLI の `link` + `db push` で適用する (認証情報は GitHub Secrets にのみ置き、エージェントは受け取らない)。デプロイ前に、DB設計レビューの P0 から「定義削除で過去記録を失わない」「`recorded_at` の意味の確定」の2点だけを先行マイグレーションで固める。React アプリのホスティングデプロイは今回行わない (手元の学習・遊び用として残す)。入力経路の追加として、Muse スペース (Web アーティファクト) から Supabase REST API を直接呼ぶ試作を作り、ログインと `save_record` RPC の保存が通ることを確認する。本組みのスペースは別計画とする。
 
 **Tech Stack:** Supabase Cloud / Supabase CLI 2.x / PostgreSQL / React 19 + TypeScript (既存) / Muse スペース (静的 Web アーティファクト + fetch)
 
@@ -17,7 +17,7 @@
 - P0 の対応範囲は設計レビューの **1 (定義削除で過去記録を失わない)** と **3 (`recorded_at` の意味の確定)** のみ。2 (記録済み定義の変更禁止) と 4 (書き込み経路の RPC 限定) は今回やらない。試行錯誤のしやすさを優先する判断 (2026-11-07 合意)。
 - React アプリのホスティングデプロイはしない。フロントの動作確認はローカル `npm run dev` とスペース試作で行う。
 - P1 検証は冬月さんが自分の PC から実施する (Task 5)。エージェントは手順と確認観点を提供し、結果の記録だけ行う。
-- Supabase のアクセストークンや DB パスワードをチャットやファイルに平文で残さない。エージェントの VM から CLI を実行する場合、トークンは Muse の Secure Vault 経由で受け取る。
+- Supabase のアクセストークンと DB パスワードは GitHub Secrets にだけ登録する。チャットやファイルに平文で残さず、エージェントは値を受け取らない・保持しない。
 - DB は `text + CHECK` の流儀 (enum は使わない)。RPC は `security invoker` + `set search_path = ''` を維持する。
 - 日本語表記: 丸括弧は半角 `()`、日本語と括弧の間に半角スペース、日本語と数字の間にスペースを入れない。
 - ローカル Docker 前提の `supabase start` はエージェントの VM では動かせない (権限制限)。ローカルDBが必要な確認は冬月さんの PC 側で行う。
@@ -40,6 +40,7 @@
 | `supabase/migrations/<timestamp>_protect_history_from_definition_delete.sql` | is_active 追加・FK の NO ACTION 化・save_record 修正・コメント | 新規 |
 | `src/features/records/api.ts` | 入力用取得で無効フィールドを除外 | 修正 |
 | `src/types/database.ts` | Supabase 自動生成型 (`db:types` または `--linked` で再生成) | 再生成 |
+| `.github/workflows/supabase-deploy.yml` | マイグレーションの本番適用と型再生成を行う GitHub Actions ワークフロー | 新規 |
 | `README.md` | `recorded_at` の意味を明記 | 修正 |
 | (リポジトリ外) Muse スペース試作 | ログイン + save_record 疎通確認 | 新規 |
 
@@ -212,20 +213,24 @@ npm run build && npm run lint
 
 Expected: 型エラー・lint エラーなし (`is_active` の型は Step 6 の再生成後に揃う。再生成までは `record_fields` の行型に `is_active` が無くても、埋め込みフィルタは文字列指定のため型エラーにはならない)。
 
-- [ ] **Step 6: 型を再生成する (Task 3 の link 完了後に実施)**
+- [ ] **Step 6: 型を再生成する (Task 3 の GitHub Actions ワークフローが実施)**
+
+ワークフローが `db push` の直後に次を実行して検証し、差分があれば `src/types/database.ts` をコミットして戻す。
 
 ```bash
 supabase gen types typescript --linked > src/types/database.ts
 ```
 
-Expected: `record_fields` の Row / Insert / Update に `is_active: boolean` が含まれる。再度 `npm run build` が通る。
+Expected: `record_fields` の Row / Insert / Update に `is_active: boolean` が含まれる。ワークフロー内の `npm run build` が通る。
 
 - [ ] **Step 7: コミット (エージェントが実施)**
 
 ```bash
-git add supabase/migrations/ src/features/records/api.ts src/types/database.ts README.md
+git add supabase/migrations/ src/features/records/api.ts README.md
 git commit -m "feat: フィールド無効化と定義削除からの履歴保護を追加"
 ```
+
+(`src/types/database.ts` は Step 6 のワークフローが別コミットで戻す)
 
 ---
 
@@ -235,7 +240,7 @@ git commit -m "feat: フィールド無効化と定義削除からの履歴保�
 
 **Interfaces:**
 - Produces: プロジェクトの `Project ref` と API URL (`https://<ref>.supabase.co`)、anon key。後続タスクとスペース試作がこれを使う。
-- 注意: DB パスワードとアクセストークンはチャットに貼らない。エージェントが CLI を実行する場合は Secure Vault 経由で渡す。
+- 注意: DB パスワードとアクセストークンはチャットに貼らない。CLI 実行用の認証情報は GitHub Secrets に登録する (Task 3)。
 
 - [ ] **Step 1: プロジェクトを作成する**
 
@@ -254,53 +259,88 @@ Project ref と API URL だけを共有する (anon key はプロジェクトの
 
 ---
 
-## Task 3: マイグレーションの本番適用 (link + db push)
+## Task 3: マイグレーションの本番適用 (GitHub Actions)
 
-**Files:** なし (CLI 操作)。`supabase/config.toml` は変更しない。
+**Files:**
+- Create: `.github/workflows/supabase-deploy.yml`
 
 **Interfaces:**
 - Consumes: Task 1 のマイグレーション3本 (init、add_record_history、本計画の新規1本)、Task 2 の Project ref。
-- Produces: 本番 DB に全マイグレーションが適用済みの状態。これが設計レビュー P1 の「空の環境へ全マイグレーションを順に適用できる」「本番へ `db push` できる」の確認を兼ねる。
+- Produces: 本番 DB に全マイグレーションが適用済みの状態と、本番スキーマから再生成された `src/types/database.ts` のコミット。これが設計レビュー P1 の「空の環境へ全マイグレーションを順に適用できる」「本番へ `db push` できる」の確認を兼ねる。
+- 認証情報の扱い: アクセストークンと DB パスワードは GitHub Secrets にのみ置く。エージェントは値を受け取らず、ワークフローの実行ログで結果だけを確認する。
 
-- [ ] **Step 1: アクセストークンを受け取る**
+- [ ] **Step 1: GitHub Secrets を登録する (冬月さんの作業)**
 
-Secure Vault 経由で Supabase のアクセストークン (Account → Access Tokens で発行) を受け取り、環境変数 `SUPABASE_ACCESS_TOKEN` としてのみ使う。ファイルに書き残さない。
+リポジトリの Settings → Secrets and variables → Actions で、次を New repository secret として登録する。
+- `SUPABASE_ACCESS_TOKEN`: Supabase の Account → Access Tokens で発行したアクセストークン
+- `SUPABASE_DB_PASSWORD`: プロジェクト作成時に決めた DB パスワード
 
-- [ ] **Step 2: link する**
+- [ ] **Step 2: ワークフローファイルを作成する (エージェントがコミット)**
 
-```bash
-supabase link --project-ref <Project ref>
+`.github/workflows/supabase-deploy.yml` を次の内容で作成する。`db push` の後に型を再生成してビルド検証し、差分があればコミットして戻す。型コミットは `supabase/migrations/**` を変更しないため、このワークフローは再実行されない。
+
+```yaml
+name: Deploy migrations to Supabase
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [develop]
+    paths:
+      - "supabase/migrations/**"
+
+permissions:
+  contents: write
+
+env:
+  SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+  SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+  PROJECT_REF: qlxklpgglbalmrwrpfpq
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.58.5
+      - name: Link project
+        run: supabase link --project-ref "$PROJECT_REF" -p "$SUPABASE_DB_PASSWORD"
+      - name: Migrations before push
+        run: supabase migration list --linked
+      - name: Push migrations
+        run: supabase db push
+      - name: Migrations after push
+        run: supabase migration list --linked
+      - name: Regenerate types
+        run: supabase gen types typescript --linked > src/types/database.ts
+      - name: Verify build with regenerated types
+        run: |
+          npm ci
+          npm run build
+      - name: Commit regenerated types
+        run: |
+          if git diff --quiet -- src/types/database.ts; then
+            echo "types unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/types/database.ts
+          git commit -m "chore: 本番DBから型を再生成"
+          git push
 ```
 
-Expected: `Finished supabase link.` と表示される。
+- [ ] **Step 3: 初回実行する**
 
-- [ ] **Step 3: 適用前の状態を確認する**
+Actions タブから `Deploy migrations to Supabase` を Run workflow で実行する (2回目以降は、マイグレーションファイルのプッシュでも自動実行される)。
 
-```bash
-supabase migration list --linked
-```
+Expected: `Migrations before push` ではローカル3本がすべて未適用、`Push migrations` がエラーなく完了し、`Migrations after push` では3本すべてに Remote のタイムスタンプが入る。あわせて Task 1 の Step 6 (型再生成) がワークフロー内で実施され、差分があれば `chore: 本番DBから型を再生成` のコミットが develop に増える。
 
-Expected: ローカル3本がすべて未適用 (Remote が空) で表示される。
+- [ ] **Step 4: 本番の外部キー設定を確認する (冬月さんの作業)**
 
-- [ ] **Step 4: db push する**
-
-```bash
-supabase db push
-```
-
-Expected: 3本のマイグレーションが順に適用され、エラーなく完了する。
-
-- [ ] **Step 5: 適用後の状態を確認する**
-
-```bash
-supabase migration list --linked
-```
-
-Expected: 3本すべてに Remote のタイムスタンプが入る。あわせて Task 1 の Step 6 (型再生成) と Step 7 (コミット) をここで実施する。
-
-- [ ] **Step 6: 本番の外部キー設定を確認する**
-
-SQL エディタで Task 1 Step 2 と同じ列挙クエリを実行する。
+ダッシュボードの SQL エディタで Task 1 Step 2 と同じ列挙クエリを実行する。
 
 Expected: `record_fields.item_id`、`records.item_id`、`record_values.field_id` の `delete_rule` が `NO ACTION` になっている。`record_values.record_id` は `CASCADE` のまま。
 
