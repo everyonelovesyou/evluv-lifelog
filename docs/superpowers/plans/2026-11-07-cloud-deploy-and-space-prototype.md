@@ -25,7 +25,7 @@
 ## Review Focus
 
 - 定義 (項目・フィールド) を物理削除しようとした操作: 過去記録がある場合は DB が拒否し、履歴が欠けないこと (Task 1)。
-- フィールドを無効化した直後の保存: 無効化された必須フィールドが原因で `save_record` が失敗しないこと (Task 1)。
+- フィールドを無効化した直後の保存: 無効化された必須フィールドが原因で `save_record` が失敗しないこと。あわせて、daily 項目の再保存で無効フィールドの過去値が消えないこと (Task 1 で RPC を変更し、Task 5 で回帰確認する)。
 - フィールドを無効化した項目の入力画面: そのフィールドだけが入力欄から消え、他のフィールドは通常どおり入力できること (Task 1、Task 5 で目視)。
 - クラウドプロジェクト作成直後の第三者アクセス: anon key だけでは他ユーザーの行が読めないこと (Task 5 の RLS 確認で担保)。
 - スペース試作での認証情報の扱い: パスワードはスペースのフォームから Supabase へ直接送られ、エージェントやファイルに残らないこと (Task 6)。
@@ -36,7 +36,7 @@
 
 | ファイル | 役割 | 操作 |
 |---|---|---|
-| `supabase/migrations/<timestamp>_protect_history_from_definition_delete.sql` | is_active 追加・FK の RESTRICT 化・save_record 修正・コメント | 新規 |
+| `supabase/migrations/<timestamp>_protect_history_from_definition_delete.sql` | is_active 追加・FK の NO ACTION 化・save_record 修正・コメント | 新規 |
 | `src/features/records/api.ts` | 入力用取得で無効フィールドを除外 | 修正 |
 | `src/types/database.ts` | Supabase 自動生成型 (`db:types` または `--linked` で再生成) | 再生成 |
 | `README.md` | `recorded_at` の意味を明記 | 修正 |
@@ -75,34 +75,51 @@ alter table public.record_fields
 comment on column public.record_fields.is_active is
   '入力対象かどうか。false でも過去の値は履歴に表示する';
 
--- 2. 定義の物理削除で過去の記録・値が連鎖削除されないよう、外部キーを RESTRICT に変更する
+-- 2. 定義の物理削除で過去の記録・値が連鎖削除されないよう、外部キーを NO ACTION に変更する
+--    RESTRICT は行ごとに即時チェックされ、auth.users からの連鎖削除 (ユーザー削除) と
+--    競合し得るため使わない。NO ACTION は文の終了時にチェックされるので、1つの文で
+--    連鎖が完結するユーザー削除は通り、定義の直接削除は子行が残るため文終了時点で拒否される。
 --    record_values.record_id -> records は「記録を消せば値も消える」が正しいため CASCADE のままにする
 alter table public.record_fields
   drop constraint record_fields_item_id_fkey,
   add constraint record_fields_item_id_fkey
-    foreign key (item_id) references public.record_items (id) on delete restrict;
+    foreign key (item_id) references public.record_items (id) on delete no action;
 
 alter table public.records
   drop constraint records_item_id_fkey,
   add constraint records_item_id_fkey
-    foreign key (item_id) references public.record_items (id) on delete restrict;
+    foreign key (item_id) references public.record_items (id) on delete no action;
 
 alter table public.record_values
   drop constraint record_values_field_id_fkey,
   add constraint record_values_field_id_fkey
-    foreign key (field_id) references public.record_fields (id) on delete restrict;
+    foreign key (field_id) references public.record_fields (id) on delete no action;
 
 -- 3. recorded_at の意味を明記する (P0-3)
 comment on column public.records.recorded_at is
   'ユーザーが保存操作を行った時刻。daily 項目の再保存で更新される。出来事の発生時刻ではない';
 
--- 4. save_record の必須フィールド検証から無効フィールドを除外する
+-- 4. save_record を無効フィールドに対応させる (変更は次の2か所のみ)
 --    init マイグレーションの save_record を全文 create or replace し、
---    必須チェックの where 句に `and f.is_active` を追加したものにする。
---    変更点はその1行のみ。他は init の定義と完全に一致させる。
+--    下記2か所だけを変更したものにする。他は init の定義と完全に一致させる。
+--    (a) daily 更新時の値の全件削除で、無効フィールドの既存値を削除対象から外す
+--        (入力取得から無効フィールドが除外され再登録されないため、そのままでは過去値が消える)
+--    (b) 必須フィールド検証から無効フィールドを除外する
 ```
 
-`save_record` の再定義では、必須チェック部分が次の形になること。
+`save_record` の再定義では、daily 更新時の値削除が次の形になること。
+
+```sql
+      update public.records set recorded_at = p_recorded_at where id = v_record_id;
+      delete from public.record_values v
+      where v.record_id = v_record_id
+        and exists (
+          select 1 from public.record_fields f
+          where f.id = v.field_id and f.is_active
+        );
+```
+
+必須チェック部分が次の形になること。
 
 ```sql
   select f.field_key into v_missing_field
@@ -119,14 +136,25 @@ comment on column public.records.recorded_at is
 
 - [ ] **Step 2: 制約名が実在するか確認する**
 
-冬月さんの PC のローカル DB、または Task 3 の link 後に SQL エディタで確認する。
+本番プロジェクトは空で、`link` の時点では対象テーブル自体が存在しないため、本番では事前確認できない。事前確認は次のどちらかで行う。
+- 静的確認: init マイグレーションのインライン参照は PostgreSQL のデフォルト命名 (`<テーブル名>_<カラム名>_fkey`) で制約が作られるため、想定名は SQL から確定できる。
+- 実DB確認: 冬月さんの PC のローカル DB で確認する。想定名だけで絞ると実名が異なる場合に発見できないため、対象テーブルの外部キーを列挙するクエリを使う。
 
 ```sql
-select conname from pg_constraint
-where conname in ('record_fields_item_id_fkey', 'records_item_id_fkey', 'record_values_field_id_fkey');
+select tc.table_name, kcu.column_name, tc.constraint_name,
+       ccu.table_name as foreign_table_name, rc.delete_rule
+from information_schema.table_constraints tc
+join information_schema.key_column_usage kcu
+  on kcu.constraint_name = tc.constraint_name and kcu.constraint_schema = tc.constraint_schema
+join information_schema.constraint_column_usage ccu
+  on ccu.constraint_name = tc.constraint_name and ccu.constraint_schema = tc.constraint_schema
+join information_schema.referential_constraints rc
+  on rc.constraint_name = tc.constraint_name and rc.constraint_schema = tc.constraint_schema
+where tc.constraint_type = 'FOREIGN KEY'
+  and tc.table_name in ('record_fields', 'records', 'record_values');
 ```
 
-Expected: 3行返る。異なる名前が返った場合は、マイグレーション側の名前を実名に合わせて直す。
+Expected: 想定した3つの制約名が含まれ、`delete_rule` がすべて `CASCADE`。異なる名前があった場合は、マイグレーション側の名前を実名に合わせて直す。本番での確認は Task 3 の適用後に移す (Task 3 Step 6)。
 
 - [ ] **Step 3: 入力用取得で無効フィールドを除外する**
 
@@ -244,6 +272,12 @@ supabase migration list --linked
 
 Expected: 3本すべてに Remote のタイムスタンプが入る。あわせて Task 1 の Step 6 (型再生成) と Step 7 (コミット) をここで実施する。
 
+- [ ] **Step 6: 本番の外部キー設定を確認する**
+
+SQL エディタで Task 1 Step 2 と同じ列挙クエリを実行する。
+
+Expected: `record_fields.item_id`、`records.item_id`、`record_values.field_id` の `delete_rule` が `NO ACTION` になっている。`record_values.record_id` は `CASCADE` のまま。
+
 ---
 
 ## Task 4: 実アカウントの作成と初期項目の確認
@@ -303,21 +337,24 @@ Expected: 3本のマイグレーションがエラーなく適用される (P1-7
 
 - [ ] **Step 4: フィールド無効化の動作を確認する**
 
-いずれかのフィールドを SQL で `is_active = false` にし、次を確認する。
-- 入力画面からそのフィールドだけが消えること
-- その項目の保存が必須チェックで失敗しないこと (対象が必須フィールドの場合)
-- 履歴では無効化前の値が表示され続けること
+次の順序で回帰確認する (daily 項目の再保存で無効フィールドの過去値が消えないことの確認を含む)。
+1. daily 項目 (例: 外出) に、複数フィールドの値 (外出した=はい、メモ=任意の文) を保存する。
+2. 値が存在するフィールドの1つ (メモ) を SQL で `is_active = false` にする。
+3. 入力画面で、そのフィールドだけが消えていることを確認する。
+4. 同じ記録対象日で、有効フィールド (外出した) を更新して保存する。
+5. 無効化したフィールドの既存値が、DB の `record_values` と履歴表示の両方に残っていることを確認する。
+6. 必須フィールドを無効化した場合は、その項目の保存が必須チェックで失敗しないこともあわせて確認する。
 
 - [ ] **Step 5: 定義の物理削除が拒否されることを確認する**
 
-記録が存在する項目またはフィールドを SQL で delete し、外部キー違反で拒否されることを確認する。あわせて、記録の存在しない定義同士でも、フィールドが残る項目は削除できない (RESTRICT) ことを確認する。
+記録が存在する項目またはフィールドを SQL で delete し、外部キー違反で拒否されることを確認する。あわせて、記録の存在しない定義同士でも、フィールドが残る項目は削除できない (NO ACTION) ことを確認する。
 
 - [ ] **Step 6: RLS と不正保存を確認する (本番)**
 
 本番プロジェクトにテスト用ユーザーBを追加で作成し、ユーザーBのセッションから次を確認する (P1-6)。
 - ユーザーA (冬月さん) の項目・記録が読めないこと
 - ユーザーAの `item_id` / `field_id` を指定した `save_record` が拒否されること
-- 確認後、テスト用ユーザーBとそのデータを削除する
+- 確認後、ユーザーBに記録を数件作ってから、ダッシュボードでユーザーBを削除する。定義間の外部キーが NO ACTION でも、`auth.users` からの連鎖削除でユーザーごと削除できることと、Bのデータが残らないことを確認する (削除できない場合は、値 → 記録 → フィールド → 項目 → ユーザーの順に手動削除する手順を定める)
 
 - [ ] **Step 7: daily の同時保存を確認する (P1-5)**
 
@@ -336,10 +373,32 @@ Expected: 3本のマイグレーションがエラーなく適用される (P1-7
 
 - [ ] **Step 1: 試作スペースを作る**
 
-静的スペースに次だけを実装する (UI の作り込みはしない)。
+静的スペースに次だけを実装する (UI の作り込みはしない)。Supabase の REST API は全リクエストに `apikey` ヘッダーを要求するため、認証と RPC の両方に付ける。
+
 - メールアドレスとパスワードの入力欄とログインボタン
-- `POST https://<ref>.supabase.co/auth/v1/token?grant_type=password` に anon key を `apikey` ヘッダーに付けて送り、返った `access_token` をメモリ上に保持する
-- ログイン後、「外出を記録する」ボタンで `POST https://<ref>.supabase.co/rest/v1/rpc/save_record` に `Authorization: Bearer <access_token>` を付けて呼び、今日の日付と外出項目の `item_id` (事前に SQL で確認した値)、`p_values` として done フィールドの `field_id` と `value_bool: true` を送る
+- ログインは次のリクエストで行い、返った `access_token` をメモリ上に保持する。
+
+```text
+POST https://<ref>.supabase.co/auth/v1/token?grant_type=password
+
+apikey: <anon key>
+Content-Type: application/json
+
+{"email": "<メールアドレス>", "password": "<パスワード>"}
+```
+
+- ログイン後、「外出を記録する」ボタンで次のリクエストを送る。`p_item_id` と `field_id` は外出項目の値 (事前に SQL で確認した値)、`p_recorded_on` は今日の日付 (YYYY-MM-DD)。
+
+```text
+POST https://<ref>.supabase.co/rest/v1/rpc/save_record
+
+apikey: <anon key>
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{"p_item_id": "<外出の item_id>", "p_recorded_on": "<今日の日付>",
+ "p_values": [{"field_id": "<done の field_id>", "value_bool": true}]}
+```
 
 - [ ] **Step 2: 疎通を確認する**
 
